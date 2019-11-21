@@ -1,0 +1,162 @@
+
+#include "opencv2/opencv.hpp"
+#include <FeatureExtract.h>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <stdlib.h>
+#include <sys/time.h>
+#include <thread>
+#include <time.h>
+#include <unistd.h>
+#define NUM_THREADS 4
+#include <time.h>
+
+
+#include <memory.h>
+#include <dirent.h>
+#include <vector>
+using namespace std;
+vector<string> getFilesList(string dir);
+static pthread_barrier_t barrier;
+
+using namespace cv;
+static const int img_num = 1;
+static const int INPUT_H = 256;
+static const int INPUT_W = 256;
+static const int INPUT_C = 3;
+static const int INPUT_SIZE = INPUT_H * INPUT_W * INPUT_C;
+static const int OUTPUT_SIZE = 2;
+
+//double elasped_time = 0;
+
+struct thread_data
+{
+  std::string serialize_output_path;
+  float *input_data;
+  float *output_feature;
+  int img_num;
+  int process_id;
+  std::string filename;
+};
+
+void *thread_infer(void *threadarg)
+{
+  float *output_feature = new float[OUTPUT_SIZE * img_num];
+  clock_t start, finish; 
+  double duration; 
+  struct thread_data *my_data;
+  my_data = (struct thread_data *)threadarg;
+  FeatureExtract extract(my_data->serialize_output_path);
+  extract.doInference(my_data->input_data, my_data->output_feature, my_data->img_num);
+  cudaMemcpyAsync(output_feature, my_data->output_feature, my_data->img_num * OUTPUT_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+
+  //float result = output_feature[OUTPUT_SIZE];
+  if (output_feature[0] > output_feature[1])
+      std::cout<<my_data->filename<<" "<<0<<" "<<output_feature[0]<<" "<<output_feature[1]<<std::endl;
+  else
+      std::cout<<my_data->filename<<" "<<1<<" "<<output_feature[0]<<" "<<output_feature[1]<<std::endl;
+
+  return 0;
+}
+
+int main(int argc, char **argv)
+{
+  pthread_barrier_init(&barrier, NULL, 4);
+  clock_t start, finish;
+  std::string path[4];
+  path[0] = "model.txt";
+  path[1] = "model.txt";
+  path[2] = "model.txt";
+  path[3] = "model.txt";
+  
+  std::string dir="../resized";
+  vector<string>allFileName = getFilesList(dir);
+
+
+  Mat img_src;
+  for (int k = 0; k< allFileName.size(); ++k)
+  {
+    string filename = allFileName.at(k);
+    img_src = imread(filename,CV_LOAD_IMAGE_COLOR);
+    float *input_data = new float[INPUT_SIZE * img_num];
+    float *output_feature = new float[OUTPUT_SIZE * img_num];
+    float *d_input_data = NULL;
+    float *d_output_feature = NULL;
+    double elasped_time = 0;
+    //std::cout<<filename<<std::endl;
+    int c = 0;
+    //std::cout<<img_src.cols<<" image cols "<<std::endl;
+    for (int i = 0; i < (INPUT_H * INPUT_W); ++i)
+    {
+      input_data[INPUT_H * INPUT_W * 0 + i] = float(img_src.data[c + 2]/255.0*2-1 );
+      input_data[INPUT_H * INPUT_W * 1 + i] = float(img_src.data[c + 1]/255.0*2-1 );
+      input_data[INPUT_H * INPUT_W * 2 + i] = float(img_src.data[c]/255.0*2-1);
+      c += 3;
+    }
+    //std::cout<<"image is transformed"<<std::endl;
+    cudaMalloc((void **)&d_input_data, img_num * INPUT_SIZE * sizeof(float));
+    cudaMalloc((void **)&d_output_feature, img_num * OUTPUT_SIZE * sizeof(float));
+    cudaMemcpy(d_input_data, input_data, img_num * INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+
+    struct thread_data td[NUM_THREADS];
+    std::thread threads[NUM_THREADS];
+    start = clock();
+    double duration;
+    for (int i = 0; i < 1; i++)
+    {
+      td[i].serialize_output_path = path[i];
+      td[i].input_data = d_input_data;
+      td[i].output_feature = d_output_feature;
+      td[i].img_num = img_num;
+      td[i].process_id = i;
+      td[i].filename = allFileName.at(k);
+      threads[i] = std::thread(thread_infer, (void *)&td[i]);
+    }
+    finish = clock();
+    duration = (double)(finish - start) / CLOCKS_PER_SEC; 
+    elasped_time += duration;
+    //std::cout<<"time is "<<elasped_time<<std::endl;
+    for (auto &thread : threads)
+    {
+      if (thread.joinable())
+      {
+        thread.join();
+      }
+    } 
+    //std::cout<<"time: "<<elasped_time<<std::endl;
+    delete[] input_data;
+    delete[] output_feature;
+    cudaFree(d_input_data);
+    cudaFree(d_output_feature);
+  }
+  return 0;
+}
+
+
+vector<string> getFilesList(string dirpath){
+    DIR *dir = opendir(dirpath.c_str());
+    if (dir == NULL)
+    {
+        cout << "opendir error" << endl;
+    }
+    vector<string> allPath;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (entry->d_type == DT_DIR){//It's dir
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                continue;
+            string dirNew = dirpath + "/" + entry->d_name;
+            vector<string> tempPath = getFilesList(dirNew);
+            allPath.insert(allPath.end(), tempPath.begin(), tempPath.end());
+        }else {
+            string name = entry->d_name;
+            string imgdir = dirpath +"/"+ name;
+            allPath.push_back(imgdir);
+        }
+    }
+    closedir(dir);
+    return allPath;
+}
+
